@@ -12,6 +12,7 @@ from pyhanko.sign.diff_analysis import (
     DEFAULT_DIFF_POLICY,
     DiffPolicy,
     DiffResult,
+    IncrementalAttributionReport,
     ModificationLevel,
     SuspiciousModification,
 )
@@ -547,6 +548,33 @@ class EmbeddedPdfSignature:
             self.signed_revision,
             field_mdp_spec=self.fieldmdp,
             doc_mdp=self.docmdp_level,
+        )
+
+    def attribute_post_signature_updates(
+        self, diff_policy: DiffPolicy | None = None
+    ) -> 'IncrementalAttributionReport':
+        """
+        Attribute every incremental revision appended after this signature's
+        signed revision.
+
+        Unlike :meth:`evaluate_modifications`, which reduces all post-signing
+        updates to a single judgment, this method produces one
+        :class:`~pyhanko.sign.diff_analysis.RevisionAttribution` record per
+        incremental revision, each with its own verdict.
+
+        :param diff_policy:
+            The difference policy to use. Defaults to
+            :const:`~pyhanko.sign.diff_analysis.DEFAULT_DIFF_POLICY`.
+        :return:
+            An
+            :class:`~pyhanko.sign.diff_analysis.IncrementalAttributionReport`.
+        """
+        from pyhanko.sign.diff_analysis import attribute_incremental_updates
+
+        return attribute_incremental_updates(
+            self.reader,
+            base_revision=self.signed_revision,
+            diff_policy=diff_policy or DEFAULT_DIFF_POLICY,
         )
 
 

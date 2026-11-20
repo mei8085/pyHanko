@@ -1,3 +1,9 @@
+from .attribution import (
+    IncrementalAttributionReport,
+    RevisionAttribution,
+    RevisionVerdict,
+    attribute_incremental_updates,
+)
 from .commons import qualify
 from .form_rules_api import (
     FieldComparisonContext,
@@ -49,16 +55,20 @@ __all__ = [
     'FormUpdate',
     'FormUpdatingRule',
     'GenericFieldModificationRule',
+    'IncrementalAttributionReport',
     'MetadataUpdateRule',
     'ModificationLevel',
     'ObjectStreamRule',
     'QualifiedWhitelistRule',
     'ReferenceUpdate',
+    'RevisionAttribution',
+    'RevisionVerdict',
     'SigFieldCreationRule',
     'SigFieldModificationRule',
     'StandardDiffPolicy',
     'SuspiciousModification',
     'WhitelistRule',
     'XrefStreamRule',
+    'attribute_incremental_updates',
     'qualify',
 ]

@@ -69,6 +69,14 @@ Subpackages
 Submodules
 ----------
 
+pyhanko.sign.diff\_analysis.attribution module
+----------------------------------------------
+
+.. automodule:: pyhanko.sign.diff_analysis.attribution
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 pyhanko.sign.diff\_analysis.commons module
 ------------------------------------------
 

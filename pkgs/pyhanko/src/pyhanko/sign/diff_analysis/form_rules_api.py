@@ -441,6 +441,11 @@ class FormUpdatingRule:
             ),
         )
 
+        if old_acroform is None and new_acroform is None:
+            # neither revision has a form, so there's nothing to compare
+            # (this can happen when diffing revisions of unsigned documents)
+            return
+
         # first, compare the entries that aren't /Fields
         compare_dicts(old_acroform, new_acroform, self.ignored_acroform_keys)
         assert isinstance(old_acroform, generic.DictionaryObject)

@@ -6,6 +6,29 @@ Release history
 pyHanko
 -------
 
+.. _release-unreleased:
+
+Unreleased
+==========
+
+New features and enhancements
+-----------------------------
+
+ * Add per-revision attribution of post-signing incremental updates:
+   :func:`~pyhanko.sign.diff_analysis.attribute_incremental_updates`
+   analyses every incremental revision individually, recording its new and
+   freed objects, metadata and page content attribution, signature coverage
+   and a per-revision verdict (allowed maintenance, unknown modification or
+   signature-breaking modification). Also available as
+   :meth:`~pyhanko.sign.validation.pdf_embedded.EmbeddedPdfSignature.attribute_post_signature_updates`.
+
+Bugs fixed
+----------
+
+ * Don't crash the form diff rule when neither revision contains an
+   ``/AcroForm`` dictionary (can happen when diffing revisions of unsigned
+   documents).
+
 .. _release-0.38.2:
 
 0.38.2
