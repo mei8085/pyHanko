@@ -83,9 +83,12 @@ class MDPPerm(OrderedEnum):
     """
     Form filling, signing and commenting are allowed.
 
-    .. warning::
-        Validating this ``/DocMDP`` level is not currently supported,
-        but included in the list for completeness.
+    When validating a document with this ``/DocMDP`` level, pyHanko will
+    additionally accept changes to annotations that are not form field
+    widgets, provided that they are limited to the annotation layer. See
+    :class:`~pyhanko.sign.diff_analysis.rules.annotation_rules.\
+AnnotationModificationRule`
+    for details.
     """
 
 

@@ -944,6 +944,11 @@ class PdfSignatureStatus(ModificationInfo, StandardCMSSignatureStatus):
                         "All modifications relate to signing and form filling "
                         "operations"
                     )
+                elif self.modification_level == ModificationLevel.ANNOTATIONS:
+                    modlvl_string = (
+                        "All modifications relate to annotations, signing and "
+                        "form filling operations"
+                    )
                 else:
                     modlvl_string = "Some modifications may be illegitimate"
                 modification_str = (

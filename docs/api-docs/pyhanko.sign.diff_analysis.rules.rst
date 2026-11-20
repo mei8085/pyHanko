@@ -4,6 +4,14 @@ pyhanko.sign.diff\_analysis.rules package
 Submodules
 ----------
 
+pyhanko.sign.diff\_analysis.rules.annotation\_rules module
+----------------------------------------------------------
+
+.. automodule:: pyhanko.sign.diff_analysis.rules.annotation_rules
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 pyhanko.sign.diff\_analysis.rules.file\_structure\_rules module
 ---------------------------------------------------------------
 

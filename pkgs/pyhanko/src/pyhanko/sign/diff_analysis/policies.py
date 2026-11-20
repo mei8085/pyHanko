@@ -10,6 +10,7 @@ from pyhanko.pdf_utils import generic, misc
 from pyhanko.pdf_utils.reader import HistoricalResolver, PdfFileReader
 from pyhanko.sign.fields import FieldMDPSpec, MDPPerm
 
+from .annotation_rules_api import AnnotationUpdateRule
 from .form_rules_api import FormUpdatingRule
 from .policy_api import (
     DiffPolicy,
@@ -17,6 +18,7 @@ from .policy_api import (
     ModificationLevel,
     SuspiciousModification,
 )
+from .rules.annotation_rules import AnnotationModificationRule
 from .rules.file_structure_rules import (
     CatalogModificationRule,
     ObjectStreamRule,
@@ -176,6 +178,17 @@ class StandardDiffPolicy(DiffPolicy):
     :param ignore_orphaned_objects:
         Some PDF writers overwrite objects with identical copies.
         Pointless and annoying, but also more or less harmless.
+    :param annotation_rule:
+        The :class:`.AnnotationUpdateRule` that adjudicates changes to
+        annotations, if any. Annotation rules are only consulted when the
+        document modification policy in force permits annotation changes
+        (``DocMDP`` level 3, i.e.
+        :attr:`~pyhanko.sign.fields.MDPPerm.ANNOTATE`).
+
+        When this is ``None`` (the default), annotation changes are never
+        cleared, even if the ``DocMDP`` policy would allow them. This matches
+        the behaviour of pyHanko versions predating the introduction of this
+        parameter.
     """
 
     def __init__(
@@ -185,9 +198,11 @@ class StandardDiffPolicy(DiffPolicy):
         reject_object_freeing=True,
         ignore_orphaned_objects=True,
         ignore_identical_objects=True,
+        annotation_rule: AnnotationUpdateRule | None = None,
     ):
         self.global_rules = global_rules
         self.form_rule = form_rule
+        self.annotation_rule = annotation_rule
         self.reject_object_freeing = reject_object_freeing
         self.ignore_orphaned_objects = ignore_orphaned_objects
         self.ignore_identical_objects = ignore_identical_objects
@@ -199,11 +214,11 @@ class StandardDiffPolicy(DiffPolicy):
         field_mdp_spec: FieldMDPSpec | None = None,
         doc_mdp: MDPPerm | None = None,
     ) -> DiffResult:
-        if doc_mdp == MDPPerm.ANNOTATE:
+        if doc_mdp == MDPPerm.ANNOTATE and self.annotation_rule is None:
             logger.warning(
-                "StandardDiffPolicy was not designed to support "
-                "DocMDP level 3 (MDPPerm.ANNOTATE). Unexpected validation "
-                "results may occur."
+                "DocMDP level 3 (MDPPerm.ANNOTATE) is in force, but the "
+                "difference analysis policy does not define an annotation "
+                "rule; annotation changes will be treated as suspicious."
             )
 
         if self.reject_object_freeing:
@@ -306,6 +321,14 @@ class StandardDiffPolicy(DiffPolicy):
                         f"signature."
                     )
 
+        # Annotation changes are only cleared if the document modification
+        # policy in force actually permits them. In all other cases, the
+        # annotation rule is not consulted, which means that the offending
+        # references will remain unexplained and the revision is rejected.
+        if self.annotation_rule is not None and doc_mdp == MDPPerm.ANNOTATE:
+            for level, au in self.annotation_rule.apply(old, new):
+                ingest_ref(level, au)
+
         unexplained_lta = new_xrefs - explained[ModificationLevel.LTA_UPDATES]
         unexplained_formfill = (
             unexplained_lta - explained[ModificationLevel.FORM_FILLING]
@@ -364,7 +387,11 @@ class StandardDiffPolicy(DiffPolicy):
                 err_msg = f"{err_msg}\n{unchecked_paths_msg}"
                 logger.debug(unchecked_paths_msg)
 
-            raise SuspiciousModification(err_msg)
+            raise SuspiciousModification(
+                err_msg,
+                revision=new.revision,
+                locations=tuple(unexplained_annot),
+            )
         elif unexplained_formfill:
             level = ModificationLevel.ANNOTATIONS
         elif unexplained_lta:
@@ -429,6 +456,16 @@ class StandardDiffPolicy(DiffPolicy):
                     f'{base_revision_no} and {revision}',
                     exc_info=e,
                 )
+                # Make sure the exception identifies the revision in which
+                # the violation occurred, even if the rule that raised it
+                # didn't record that information itself. This is important
+                # when multiple incremental updates have been appended to
+                # the signed revision: the violation may well be in one of
+                # the intermediate revisions, not in the most recent one.
+                if e.revision is None:
+                    e.revision = revision
+                if not hasattr(e, '_revision_range'):
+                    e._revision_range = (base_revision_no, revision)
                 return e
             current_max = max(current_max, diff_result.modification_level)
             changed_form_fields |= diff_result.changed_form_fields
@@ -451,6 +488,7 @@ DEFAULT_DIFF_POLICY = StandardDiffPolicy(
             GenericFieldModificationRule(),
         ],
     ),
+    annotation_rule=AnnotationModificationRule(),
 )
 """
 Default :class:`.DiffPolicy` implementation.
@@ -470,6 +508,10 @@ level :class:`~.ModificationLevel.LTA_UPDATES`.
     * :class:`.SigFieldCreationRule`,
     * :class:`.SigFieldModificationRule`,
     * :class:`.GenericFieldModificationRule`.
+* :class:`.AnnotationModificationRule`, which is only consulted if the
+  ``DocMDP`` level of the signature under validation permits annotation
+  changes (i.e. if the level is
+  :attr:`~pyhanko.sign.fields.MDPPerm.ANNOTATE`).
 """
 
 

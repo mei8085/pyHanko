@@ -51,10 +51,14 @@ class ModificationLevel(OrderedEnum):
     In addition to the previous levels, manipulating annotations is also allowed
     at this level.
 
-    .. note::
-        This level is currently unused by the default diff policy, and
-        modifications to annotations other than those permitted to fill in forms
-        are treated as suspicious.
+    This level is only awarded when the signature being validated is subject
+    to a ``/DocMDP`` policy of level 3
+    (:attr:`~pyhanko.sign.fields.MDPPerm.ANNOTATE`). In that case, the
+    annotation changes are adjudicated by an
+    :class:`.AnnotationUpdateRule`; see
+    :class:`~pyhanko.sign.diff_analysis.rules.annotation_rules.\
+AnnotationModificationRule`
+    for the behaviour of the default policy.
     """
 
     OTHER = 4
@@ -66,7 +70,30 @@ class ModificationLevel(OrderedEnum):
 
 
 class SuspiciousModification(ValueError):
-    """Error indicating a suspicious modification"""
+    """
+    Error indicating a suspicious modification.
+
+    In addition to the usual free-form error arguments, rule implementations
+    may attach the revision in which the offending modification occurred
+    (``revision``) and a summary of the offending object references or paths
+    (``locations``). The difference analysis policy machinery uses this
+    information to report precisely where a violation was found, which is
+    especially useful when a document has accumulated multiple incremental
+    updates after signing.
+    """
+
+    def __init__(self, *args, revision: int | None = None, locations=()):
+        super().__init__(*args)
+        self.revision = revision
+        """
+        The revision in which the suspicious modification was observed, if
+        known.
+        """
+        self.locations = tuple(locations)
+        """
+        A (possibly empty) tuple of object references or paths that identify
+        the offending modifications in the revision, if known.
+        """
 
 
 @dataclass(frozen=True)

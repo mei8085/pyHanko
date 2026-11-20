@@ -1,7 +1,7 @@
 from collections.abc import Callable, Generator, Iterable
 
 from pyhanko.pdf_utils import generic, misc
-from pyhanko.pdf_utils.generic import Reference
+from pyhanko.pdf_utils.generic import Reference, pdf_name
 from pyhanko.pdf_utils.reader import HistoricalResolver, RawPdfPath
 
 from ..commons import (
@@ -253,6 +253,22 @@ def is_field_visible(field_dict):
         return is_annot_visible(field_dict) or any(
             is_annot_visible(kid.get_object()) for kid in field_dict['/Kids']
         )
+
+
+def _is_widget_annotation(annot) -> bool:
+    """
+    Check whether an object looks like a widget annotation (or, more
+    generally, like a form field). Widgets are form fields, and are therefore
+    not handled by annotation rules.
+    """
+    if not isinstance(annot, generic.DictionaryObject):
+        return False
+    if '/FT' in annot:
+        return True
+    try:
+        return annot.raw_get('/Subtype') == pdf_name('/Widget')
+    except KeyError:
+        return False
 
 
 class SigFieldCreationRule(FieldMDPRule):
@@ -1032,20 +1048,46 @@ def _walk_page_tree_annots(
                 continue
             deleted_annots = old_annots - new_annots
             added_annots = new_annots - old_annots
-            if deleted_annots:
+
+            # Deleting widget annotations is never OK: widgets are part of the
+            # form structure, and their removal would invalidate the field
+            # hierarchy.
+            unexpected_deletions = {
+                annot_ref
+                for annot_ref in deleted_annots
+                if _is_widget_annotation(old(annot_ref))
+            }
+            if unexpected_deletions:
                 raise SuspiciousModification(
-                    f"Annotations {deleted_annots} were deleted."
+                    f"Annotations {unexpected_deletions} were deleted."
                 )
 
             # look up the names of the associated form field(s)
             # if any of the refs are not in the list
             # -> unrelated annotation -> bail
             unknown_annots = added_annots - field_name_dict.keys()
-            if unknown_annots:
+            # Widget annotations that we can't attribute to one of the fields
+            # we just created are definitely suspicious.
+            unexpected_widgets = {
+                annot_ref
+                for annot_ref in unknown_annots
+                if _is_widget_annotation(annot_ref.get_object())
+            }
+            if unexpected_widgets:
                 raise SuspiciousModification(
-                    f"The newly added annotations {unknown_annots} were not "
-                    "recognised."
+                    f"The newly added annotations {unexpected_widgets} were "
+                    "not recognised."
                 )
+
+            # Changes involving non-widget annotations are not adjudicated by
+            # this rule. If we cleared the page and its /Annots array here,
+            # we would end up approving them wholesale, which could let an
+            # annotation be deleted or added even when the DocMDP level
+            # forbids it. Instead, we leave the page to the annotation update
+            # rule (when the DocMDP level permits annotation changes); if no
+            # rule clears the page, the revision is rejected.
+            if deleted_annots or (added_annots - field_name_dict.keys()):
+                return
 
             # there are new annotations, and they're all changes we expect
             # => cleared to edit
@@ -1056,7 +1098,7 @@ def _walk_page_tree_annots(
             field_name = None
             if len(added_annots) == 1:
                 (uniq_annot_ref,) = added_annots
-                field_name = field_name_dict[uniq_annot_ref]
+                field_name = field_name_dict.get(uniq_annot_ref)
 
             # Make sure the page dictionaries are the same, so that we
             #  can safely clear them for modification across ALL paths

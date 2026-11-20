@@ -109,9 +109,17 @@ modified after signing (according to the diff policy used).
 
 
 .. warning::
-    The most lenient MDP level,
-    :attr:`~.pyhanko.sign.fields.MDPPerm.ANNOTATE`, is currently not
-    supported by the default diff policy.
+    Support for the most lenient MDP level,
+    :attr:`~.pyhanko.sign.fields.MDPPerm.ANNOTATE`, is necessarily limited.
+    The default diff policy will accept annotation changes at that level
+    (see
+    :class:`~.pyhanko.sign.diff_analysis.rules.annotation_rules.\
+AnnotationModificationRule`),
+    but only to the extent that the changes can be attributed to the
+    annotation layer of the document. In particular, changes to page content,
+    the structure tree, metadata streams and form fields are still rejected,
+    even though the ``/DocMDP`` level would nominally permit them.
+
 
 .. danger::
     Due to the lack of standardisation when it comes to signature validation,

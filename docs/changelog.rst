@@ -6,6 +6,30 @@ Release history
 pyHanko
 -------
 
+.. _release-unreleased:
+
+Unreleased
+==========
+
+New features and enhancements
+-----------------------------
+
+Validation
+^^^^^^^^^^
+
+ * Support incremental update analysis for documents signed with ``/DocMDP``
+   level 3 (:attr:`~pyhanko.sign.fields.MDPPerm.ANNOTATE`). The default diff
+   policy now includes
+   :class:`~pyhanko.sign.diff_analysis.rules.annotation_rules.AnnotationModificationRule`,
+   which clears annotation objects and their appearance resources, but does
+   *not* accept changes to page content, the structure tree, metadata streams
+   or form fields in the same revision.
+ * :class:`~pyhanko.sign.diff_analysis.SuspiciousModification` objects now
+   carry the revision in which the offending modification was found
+   (``revision``), together with a summary of the offending references
+   (``locations``). This makes it easier to pinpoint violations in documents
+   with multiple incremental updates after signing.
+
 .. _release-0.38.2:
 
 0.38.2

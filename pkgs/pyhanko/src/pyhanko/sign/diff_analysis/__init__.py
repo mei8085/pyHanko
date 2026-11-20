@@ -1,3 +1,4 @@
+from .annotation_rules_api import AnnotationUpdate, AnnotationUpdateRule
 from .commons import qualify
 from .form_rules_api import (
     FieldComparisonContext,
@@ -17,6 +18,7 @@ from .policy_api import (
     ModificationLevel,
     SuspiciousModification,
 )
+from .rules.annotation_rules import AnnotationModificationRule
 from .rules.file_structure_rules import (
     CatalogModificationRule,
     ObjectStreamRule,
@@ -37,6 +39,9 @@ from .rules_api import QualifiedWhitelistRule, ReferenceUpdate, WhitelistRule
 __all__ = [
     'DEFAULT_DIFF_POLICY',
     'NO_CHANGES_DIFF_POLICY',
+    'AnnotationModificationRule',
+    'AnnotationUpdate',
+    'AnnotationUpdateRule',
     'BaseFieldModificationRule',
     'CatalogModificationRule',
     'DSSCompareRule',

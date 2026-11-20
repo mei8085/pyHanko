@@ -69,6 +69,14 @@ Subpackages
 Submodules
 ----------
 
+pyhanko.sign.diff\_analysis.annotation\_rules\_api module
+---------------------------------------------------------
+
+.. automodule:: pyhanko.sign.diff_analysis.annotation_rules_api
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 pyhanko.sign.diff\_analysis.commons module
 ------------------------------------------
 
