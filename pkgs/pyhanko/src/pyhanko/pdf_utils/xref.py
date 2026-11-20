@@ -1098,6 +1098,7 @@ class XRefCache:
             if section.meta_info.stream_ref is not None
         }
         self._last_changes: dict[tuple[int, int], int] | None = None
+        self._first_mentions: dict[tuple[int, int], int] | None = None
 
     @property
     def total_revisions(self):
@@ -1131,6 +1132,55 @@ class XRefCache:
             return last_changes[(ref.idnum, ref.generation)]
         except KeyError:
             raise KeyError(ref) from None
+
+    def ref_was_known_to_revision(
+        self, ref: generic.Reference, revision
+    ) -> bool:
+        """
+        Check whether a reference was mentioned in the cross-reference data of
+        the given revision or any revision preceding it.
+
+        Unlike :meth:`get_historical_ref`, this treats every xref entry as a
+        mention, even if the entry is freed or does not actually resolve to an
+        object. That makes it suitable as a conservative scope check: if a
+        document's xref data claims an object ID at some point, later
+        revisions should not be assumed to be free to allocate it.
+
+        Note that generation numbers are compared strictly, and that the
+        lookup is bounded by ``revision``: entries introduced later do not
+        count.
+
+        :param ref:
+            The reference to check.
+        :param revision:
+            The revision number (the oldest one being zero).
+        :return:
+            ``True`` if the reference was mentioned, ``False`` otherwise.
+        """
+        first_mentions = self._first_mentions
+        if first_mentions is None:
+            first_mentions = self._first_mentions = self._index_first_mentions()
+        try:
+            return first_mentions[(ref.idnum, ref.generation)] <= revision
+        except KeyError:
+            return False
+
+    def _index_first_mentions(self) -> dict[tuple[int, int], int]:
+        # Oldest section first, so the earliest revision that mentions a
+        # reference wins. Every xref entry counts, even free instructions and
+        # entries that fail to resolve.
+        first_mentions: dict[tuple[int, int], int] = {}
+        for ix, section in enumerate(self._xref_sections):
+            data = section.xref_data
+            candidates = data.explicit_refs_in_revision
+            hybrid = data.hybrid
+            if hybrid is not None:
+                candidates = (
+                    candidates | hybrid.xref_data.explicit_refs_in_revision
+                )
+            for key in candidates:
+                first_mentions.setdefault(key, ix)
+        return first_mentions
 
     def object_streams_used_in(self, revision):
         section = self._xref_sections[revision]

@@ -3078,6 +3078,211 @@ def test_allow_identical_object_replacement_nonsensical_obj_nonstrict():
     assert val_status.modification_level == ModificationLevel.LTA_UPDATES
 
 
+# A page content stream whose object ID is deliberately beyond the /Size
+# declared in the trailer. Lenient parsers accept such files, and the xref
+# data is the only reliable source of truth about which object IDs are in
+# use.
+_UNDERSTATED_SIZE_CONTENT_ID = 100
+_UNDERSTATED_SIZE_CONTENT = b'BT /F1 24 Tf 50 700 Td (Original) Tj ET'
+_UNDERSTATED_SIZE_TAMPERED = b'BT /F1 24 Tf 50 700 Td (Tampered) Tj ET'
+
+
+def _pdf_with_understated_size(content_offset=None) -> bytes:
+    objs = {
+        1: b'<< /Type /Catalog /Pages 2 0 R >>',
+        2: b'<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+        3: b'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] '
+        b'/Resources << /Font << /F1 4 0 R >> >> '
+        b'/Contents %d 0 R >>' % _UNDERSTATED_SIZE_CONTENT_ID,
+        4: b'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+        _UNDERSTATED_SIZE_CONTENT_ID: (
+            b'<< /Length %d >>\nstream\n%s\nendstream'
+            % (len(_UNDERSTATED_SIZE_CONTENT), _UNDERSTATED_SIZE_CONTENT)
+        ),
+    }
+    out = bytearray(b'%PDF-1.7\n%\xe2\xe3\xcf\xd3\n')
+    offsets = {}
+    for num in sorted(objs):
+        offsets[num] = len(out)
+        out += b'%d 0 obj\n' % num + objs[num] + b'\nendobj\n'
+    xref_pos = len(out)
+    # objects 1-4 are covered by /Size 5, but the content object is not
+    out += b'xref\n0 5\n0000000000 65535 f \n'
+    for num in range(1, 5):
+        out += b'%010d 00000 n \n' % offsets[num]
+    if content_offset is None:
+        content_offset = offsets[_UNDERSTATED_SIZE_CONTENT_ID]
+    out += b'%d 1\n%010d 00000 n \n' % (
+        _UNDERSTATED_SIZE_CONTENT_ID,
+        content_offset,
+    )
+    out += b'trailer\n<< /Size 5 /Root 1 0 R >>\n'
+    out += b'startxref\n%d\n%%%%EOF\n' % xref_pos
+    return bytes(out)
+
+
+def _sign_pdf_with_understated_size() -> BytesIO:
+    w = IncrementalPdfFileWriter(
+        BytesIO(_pdf_with_understated_size()), strict=False
+    )
+    fields.append_signature_field(w, fields.SigFieldSpec(sig_field_name='Sig1'))
+    return signers.sign_pdf(
+        w,
+        signers.PdfSignatureMetadata(field_name='Sig1'),
+        signer=FROM_CA,
+    )
+
+
+def test_ref_scope_with_understated_size_nonstrict():
+    # Such a file is rejected in strict mode ...
+    with pytest.raises(PdfStrictReadError, match='size mismatch'):
+        PdfFileReader(BytesIO(_pdf_with_understated_size()))
+
+    # ... but the lenient parser accepts it.
+    r = PdfFileReader(BytesIO(_pdf_with_understated_size()), strict=False)
+    resolver = r.get_historical_resolver(0)
+
+    # Even though object 100 lies beyond the declared /Size, the xref data
+    # puts it in scope for revision 0.
+    assert not resolver.is_ref_unassignable(
+        Reference(_UNDERSTATED_SIZE_CONTENT_ID, 0)
+    )
+    # A reference that no xref section defines is still fresh.
+    assert resolver.is_ref_unassignable(
+        Reference(_UNDERSTATED_SIZE_CONTENT_ID + 1, 0)
+    )
+    # Generations still distinguish objects from one another.
+    assert resolver.is_ref_unassignable(
+        Reference(_UNDERSTATED_SIZE_CONTENT_ID, 1)
+    )
+    # IDs below the declared size behave exactly as before.
+    assert not resolver.is_ref_unassignable(Reference(3, 0))
+    assert not resolver.is_ref_unassignable(Reference(4, 0))
+
+
+@freeze_time('2020-11-01')
+def test_understated_size_legit_update_nonstrict():
+    # A benign incremental update to a leniently parsed file is still fine.
+    out = _sign_pdf_with_understated_size()
+    w = IncrementalPdfFileWriter(out, strict=False)
+    w.set_info(
+        generic.DictionaryObject(
+            {pdf_name('/Title'): generic.pdf_string('Hello')}
+        )
+    )
+    w.write_in_place()
+
+    r = PdfFileReader(out, strict=False)
+    status = validate_pdf_signature(
+        r.embedded_signatures[0], simple_v_context()
+    )
+    assert status.modification_level == ModificationLevel.LTA_UPDATES
+
+
+@freeze_time('2020-11-01')
+@pytest.mark.parametrize(
+    'replacement,expected',
+    [
+        # re-declaring the object with identical content is a harmless no-op
+        (None, ModificationLevel.LTA_UPDATES),
+        # replacing signed content is not signature maintenance
+        (_UNDERSTATED_SIZE_TAMPERED, ModificationLevel.OTHER),
+    ],
+)
+def test_understated_size_content_override_nonstrict(replacement, expected):
+    out = _sign_pdf_with_understated_size()
+    w = IncrementalPdfFileWriter(out, strict=False)
+    contents_ref = w.root['/Pages']['/Kids'][0].raw_get('/Contents')
+    assert contents_ref.idnum == _UNDERSTATED_SIZE_CONTENT_ID, (
+        "test fixture is out of sync"
+    )
+    content_stream = contents_ref.get_object()
+    if replacement is not None:
+        content_stream._data = replacement
+        content_stream._encoded_data = None
+    w.mark_update(contents_ref)
+    w.write_in_place()
+
+    r = PdfFileReader(out, strict=False)
+    emb = r.embedded_signatures[0]
+    # the signed revision genuinely does not cover the content object
+    # according to its own /Size entry
+    signed_size = r.xrefs.get_xref_container_info(emb.signed_revision).size
+    assert signed_size <= _UNDERSTATED_SIZE_CONTENT_ID
+
+    status = validate_pdf_signature(emb, simple_v_context())
+    assert status.modification_level == expected
+    if expected == ModificationLevel.OTHER:
+        assert 'without precise justification' in str(emb.diff_result)
+        assert repr(contents_ref.reference) in str(emb.diff_result)
+
+
+@freeze_time('2020-11-01')
+def test_understated_size_new_sig_field_nonstrict():
+    # Objects that genuinely don't exist in the signed revision are still
+    # treated as new: adding an (invisible) signature field after signing
+    # remains an ordinary signature-maintenance update rather than being
+    # mistaken for an override.
+    out = _sign_pdf_with_understated_size()
+    w = IncrementalPdfFileWriter(out, strict=False)
+    fields.append_signature_field(w, fields.SigFieldSpec(sig_field_name='Sig2'))
+    w.write_in_place()
+
+    r = PdfFileReader(out, strict=False)
+    emb = r.embedded_signatures[0]
+    signed_resolver = r.get_historical_resolver(emb.signed_revision)
+    field_refs = [f.reference for f in r.root['/AcroForm']['/Fields']]
+    new_field_ref = field_refs[1]
+    # the new field is allocated beyond the signed revision's /Size, but was
+    # not defined by it either, so it must count as fresh
+    signed_size = r.xrefs.get_xref_container_info(emb.signed_revision).size
+    assert new_field_ref.idnum >= signed_size
+    assert signed_resolver.is_ref_unassignable(new_field_ref)
+    status = validate_pdf_signature(emb, simple_v_context())
+    assert status.modification_level == ModificationLevel.LTA_UPDATES
+
+
+@freeze_time('2020-11-01')
+def test_understated_size_dss_update_nonstrict():
+    # Signature maintenance (a DSS update) on a leniently parsed file is
+    # cleared at LTA level exactly as it would be in a well-formed file.
+    out = _sign_pdf_with_understated_size()
+    w = IncrementalPdfFileWriter(out, strict=False)
+    w.root['/DSS'] = generic.DictionaryObject()
+    w.update_root()
+    w.write_in_place()
+
+    r = PdfFileReader(out, strict=False)
+    status = validate_pdf_signature(
+        r.embedded_signatures[0], simple_v_context()
+    )
+    assert status.modification_level == ModificationLevel.LTA_UPDATES
+
+
+def _pdf_with_dangling_xref_entry() -> bytes:
+    # Like _pdf_with_understated_size, but the content object's xref entry
+    # points past the end of the file instead of at the object, so it cannot
+    # be resolved.
+    data = _pdf_with_understated_size()
+    return _pdf_with_understated_size(content_offset=len(data))
+
+
+def test_ref_scope_dangling_xref_is_treated_as_in_scope():
+    # Even though the entry does not resolve, the xref data still claims the
+    # object ID. Treating it as in scope is the conservative choice: a later
+    # revision that touches the ID must be scrutinised as an override, not
+    # waved through as a freshly allocated object.
+    r = PdfFileReader(BytesIO(_pdf_with_dangling_xref_entry()), strict=False)
+    resolver = r.get_historical_resolver(0)
+    assert not resolver.is_ref_unassignable(
+        Reference(_UNDERSTATED_SIZE_CONTENT_ID, 0)
+    )
+    # A reference that no xref section mentions at all is still fresh.
+    assert resolver.is_ref_unassignable(
+        Reference(_UNDERSTATED_SIZE_CONTENT_ID + 1, 0)
+    )
+
+
 def _sign_twice_with_undefined_refs() -> BytesIO:
     # Both the page and the form refer to an object that no revision
     # defines, and the second signature updates both of them, so the

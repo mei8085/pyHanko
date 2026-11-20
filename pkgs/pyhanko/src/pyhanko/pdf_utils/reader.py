@@ -1095,7 +1095,21 @@ class HistoricalResolver(PdfHandler):
         meta = xref_cache.get_xref_container_info(self.revision)
         # the maximal object ID is (size - 1), so the reference is allocatable
         # as long as the ID is strictly less than meta.size
-        return ref.idnum >= meta.size
+        if ref.idnum < meta.size:
+            return False
+
+        # In leniently parsed files, the trailer's /Size entry may understate
+        # the highest object ID that is actually in use (some writers get this
+        # wrong, and nonstrict mode lets such files through). The xref data is
+        # authoritative in that regard: if this revision (or an earlier one)
+        # mentions a reference with the same ID and generation, then it was
+        # already in scope, and a later revision that touches it is overriding
+        # existing content rather than allocating a fresh object.
+        #
+        # Freed entries and entries that fail to resolve still count as
+        # mentions: a later revision overwriting them can't be assumed to be
+        # allocating a brand-new object in a way that is safe to clear.
+        return not xref_cache.ref_was_known_to_revision(ref, self.revision)
 
     def collect_dependencies(
         self, obj: generic.PdfObject, since_revision=None

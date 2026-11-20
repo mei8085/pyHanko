@@ -22,6 +22,10 @@ Bugs fixed
  * Compute page/structure tree index once per historical resolver.
  * Resolve historical resolver trailer entries in their own revision.
  * Disable newline normalisation in ``FileSystemTLCache``.
+ * In nonstrict mode, treat references that the cross-reference data already
+   mentions as being in scope, even if the trailer's ``/Size`` entry
+   understates the highest object ID in use. This prevents overrides of signed
+   content in such files from being misclassified as signature maintenance.
 
 
 .. _release-0.38.1:
