@@ -35,6 +35,7 @@ from .errors import (
 )
 from .name_trees import (
     ExcludedSubtrees,
+    NameConstraintError,
     PermittedSubtrees,
     default_excluded_subtrees,
     default_permitted_subtrees,
@@ -874,7 +875,15 @@ class _PathValidationState:
 
     def check_name_constraints(self, cert, proc_state: ValProcState):
         # name constraint processing
-        whitelist_result = self.permitted_subtrees.accept_cert(cert)
+        try:
+            whitelist_result = self.permitted_subtrees.accept_cert(cert)
+        except NameConstraintError as e:
+            raise PathValidationError.from_state(
+                "The path could not be validated because "
+                f"{proc_state.describe_cert()} could not be checked against "
+                f"the name constraints of the issuing authority: {e}",
+                proc_state,
+            ) from e
         if not whitelist_result:
             raise PathValidationError.from_state(
                 "The path could not be validated because not all names of "
@@ -882,7 +891,15 @@ class _PathValidationState:
                 f"of the issuing authority. {whitelist_result.error_message}",
                 proc_state,
             )
-        blacklist_result = self.excluded_subtrees.accept_cert(cert)
+        try:
+            blacklist_result = self.excluded_subtrees.accept_cert(cert)
+        except NameConstraintError as e:
+            raise PathValidationError.from_state(
+                "The path could not be validated because "
+                f"{proc_state.describe_cert()} could not be checked against "
+                f"the name constraints of the issuing authority: {e}",
+                proc_state,
+            ) from e
         if not blacklist_result:
             raise PathValidationError.from_state(
                 "The path could not be validated because some names of "
@@ -1468,16 +1485,23 @@ def _prepare_next_step(
     # Step 3 g
     nc_value: x509.NameConstraints = cert.name_constraints_value
     if nc_value is not None:
-        new_permitted_subtrees = nc_value['permitted_subtrees']
-        if isinstance(new_permitted_subtrees, x509.GeneralSubtrees):
-            state.permitted_subtrees.intersect_with(
-                process_general_subtrees(new_permitted_subtrees)
-            )
-        new_excluded_subtrees = nc_value['excluded_subtrees']
-        if isinstance(new_excluded_subtrees, x509.GeneralSubtrees):
-            state.excluded_subtrees.union_with(
-                process_general_subtrees(new_excluded_subtrees)
-            )
+        try:
+            new_permitted_subtrees = nc_value['permitted_subtrees']
+            if isinstance(new_permitted_subtrees, x509.GeneralSubtrees):
+                state.permitted_subtrees.intersect_with(
+                    process_general_subtrees(new_permitted_subtrees)
+                )
+            new_excluded_subtrees = nc_value['excluded_subtrees']
+            if isinstance(new_excluded_subtrees, x509.GeneralSubtrees):
+                state.excluded_subtrees.union_with(
+                    process_general_subtrees(new_excluded_subtrees)
+                )
+        except NameConstraintError as e:
+            raise PathValidationError.from_state(
+                "The path could not be validated because the name constraints "
+                f"of {proc_state.describe_cert()} could not be processed: {e}",
+                proc_state,
+            ) from e
 
     # Step 3 h-j
     state.update_policy_restrictions(cert)

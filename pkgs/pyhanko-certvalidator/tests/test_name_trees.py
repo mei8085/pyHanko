@@ -1,9 +1,11 @@
 import pytest
 from pyhanko_certvalidator.name_trees import (
+    MalformedNameConstraintError,
     NameConstraintError,
     dns_tree_contains,
     email_tree_contains,
     host_tree_contains,
+    ip_tree_contains,
     uri_tree_contains,
 )
 
@@ -113,3 +115,91 @@ def test_uri_tree_contains(base, other, expected):
 def test_uri_tree_contains_requires_fqdn(uri):
     with pytest.raises(NameConstraintError, match='require URIs'):
         uri_tree_contains('example.com', uri)
+
+
+@pytest.mark.parametrize(
+    'base,other,expected',
+    [
+        ('192.0.2.0/24', '192.0.2.1', True),
+        ('192.0.2.0/24', '192.0.2.255', True),
+        ('192.0.2.0/24', '192.0.3.1', False),
+        ('192.0.2.0/24', '198.51.100.1', False),
+        # a single-host range
+        ('192.0.2.1/32', '192.0.2.1', True),
+        ('192.0.2.1/32', '192.0.2.2', False),
+        # a bare address is a single host
+        ('192.0.2.1', '192.0.2.1', True),
+        ('192.0.2.1', '192.0.2.2', False),
+        # 'all addresses' ranges
+        ('0.0.0.0/0', '10.1.2.3', True),
+        ('::/0', '2001:db8::1', True),
+        # IPv6
+        ('2001:db8::/32', '2001:db8::1', True),
+        ('2001:db8::/32', '2001:db8:ffff::1', True),
+        ('2001:db8::/32', '2001:db9::1', False),
+        ('2001:db8::/128', '2001:db8::', True),
+        ('2001:db8::/128', '2001:db8::1', False),
+        # address families are disjoint
+        ('192.0.2.0/24', '2001:db8::1', False),
+        ('2001:db8::/32', '192.0.2.1', False),
+    ],
+)
+def test_ip_tree_contains_strings(base, other, expected):
+    assert ip_tree_contains(base, other) is expected
+
+
+@pytest.mark.parametrize(
+    'base,other,expected',
+    [
+        # IPv4 /24: 192.0.2.0/24
+        (bytes([192, 0, 2, 0, 255, 255, 255, 0]), bytes([192, 0, 2, 1]), True),
+        (bytes([192, 0, 2, 0, 255, 255, 255, 0]), bytes([192, 0, 3, 1]), False),
+        # IPv4 /0
+        (bytes(8), bytes([10, 0, 0, 1]), True),
+        # IPv6 /32: 2001:db8::/32
+        (
+            bytes([0x20, 0x01, 0x0D, 0xB8]) + bytes(12) + bytes([0xFF] * 4)
+            + bytes(12),
+            bytes([0x20, 0x01, 0x0D, 0xB8]) + bytes(12),
+            True,
+        ),
+        # IPv6 /128
+        (bytes(16) + bytes([0xFF] * 16), bytes(16), True),
+        (bytes(16) + bytes([0xFF] * 16), bytes(15) + b'\x01', False),
+    ],
+)
+def test_ip_tree_contains_raw_octets(base, other, expected):
+    assert ip_tree_contains(base, other) is expected
+
+
+@pytest.mark.parametrize(
+    'base,other',
+    [
+        # constraints must be 8 (IPv4) or 32 (IPv6) octets long
+        (bytes([192, 0, 2, 0]), bytes([192, 0, 2, 1])),
+        (bytes(9), bytes([192, 0, 2, 1])),
+        # names must be 4 (IPv4) or 16 (IPv6) octets long
+        ('192.0.2.0/24', bytes([192, 0, 2])),
+        ('192.0.2.0/24', bytes(8)),
+        # non-CIDR (non-contiguous) netmask
+        (bytes([192, 0, 2, 0, 255, 0, 255, 0]), bytes([192, 0, 2, 1])),
+        # address with host bits set in the constraint
+        (bytes([192, 0, 2, 99, 255, 255, 255, 0]), bytes([192, 0, 2, 1])),
+        # malformed string representations
+        ('192.0.2.99/24', '192.0.2.1'),
+        ('not-an-ip', '192.0.2.1'),
+        ('192.0.2.0/24', 'not-an-ip'),
+        ('192.0.2.0/33', '192.0.2.1'),
+    ],
+)
+def test_ip_tree_contains_rejects_malformed_input(base, other):
+    with pytest.raises(MalformedNameConstraintError):
+        ip_tree_contains(base, other)
+
+
+def test_ip_tree_contains_rejects_range_as_name():
+    import ipaddress
+
+    network = ipaddress.ip_network('192.0.2.77/24', strict=False)
+    with pytest.raises(MalformedNameConstraintError):
+        ip_tree_contains('192.0.2.0/24', network)
