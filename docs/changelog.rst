@@ -6,6 +6,39 @@ Release history
 pyHanko
 -------
 
+.. _release-unreleased:
+
+Unreleased
+==========
+
+New features and enhancements
+-----------------------------
+
+Validation
+^^^^^^^^^^
+
+ * Difference analysis now adjudicates document metadata jointly across the
+   information dictionary (``/Info``) and the XMP metadata stream
+   (``/Metadata``). The new
+   :class:`~pyhanko.sign.diff_analysis.rules.metadata_rules.MetadataIdentityRule`
+   (included in the default policy) compares the *identity semantics* of the
+   two channels, so that consistent updates to the title, author, subject and
+   creation date are recognised as a single identity change even when only one
+   channel is written.
+ * The new :mod:`pyhanko.pdf_utils.metadata.identity` module
+   (:func:`~pyhanko.pdf_utils.metadata.identity.analyse_metadata_identity`)
+   classifies metadata changes into stable verdicts: consistent in-scope
+   updates, out-of-scope channel replacements, contradictions between the
+   channels, unparseable metadata, and anomalies inherited from the base
+   revision.
+ * :class:`~pyhanko.sign.diff_analysis.SuspiciousModification` now records the
+   revision in which the offending modification was found (``revision``),
+   together with the offending object references (``locations``), and, for
+   metadata problems, the per-revision identity reports (``metadata_identity``).
+   Accepted revisions record their identity findings on
+   :attr:`~pyhanko.sign.diff_analysis.DiffResult.metadata_identity`, so
+   identity changes can be traced back to individual incremental updates.
+
 .. _release-0.38.2:
 
 0.38.2

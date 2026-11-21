@@ -29,7 +29,11 @@ from .rules.form_field_rules import (
     SigFieldCreationRule,
     SigFieldModificationRule,
 )
-from .rules.metadata_rules import DocInfoRule, MetadataUpdateRule
+from .rules.metadata_rules import (
+    DocInfoRule,
+    MetadataIdentityRule,
+    MetadataUpdateRule,
+)
 from .rules_api import QualifiedWhitelistRule, ReferenceUpdate, WhitelistRule
 
 # export list for compatibility with the old module
@@ -49,6 +53,7 @@ __all__ = [
     'FormUpdate',
     'FormUpdatingRule',
     'GenericFieldModificationRule',
+    'MetadataIdentityRule',
     'MetadataUpdateRule',
     'ModificationLevel',
     'ObjectStreamRule',

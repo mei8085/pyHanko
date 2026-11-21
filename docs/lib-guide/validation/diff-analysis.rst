@@ -74,6 +74,39 @@ To actually use a diff policy, pass it to
 :func:`~.pyhanko.sign.validation.validate_pdf_signature` via the
 ``diff_policy`` parameter.
 
+Document metadata and identity
+------------------------------
+
+Signed documents routinely carry the same descriptive information -- title,
+author, subject and creation date -- in two places: the information
+dictionary (``/Info``) and the XMP metadata stream (``/Metadata``). The default
+policy adjudicates updates to both channels *jointly*, by comparing the
+*identity* they assert rather than the individual objects that back them. This
+means that an update to the title in both channels is recognised as a single
+identity change, even though it touches two unrelated objects.
+
+Metadata changes are classified into stable outcomes:
+
+* a **consistent update** stays within the signature's coverage, and is
+  cleared at :attr:`~pyhanko.sign.diff_analysis.ModificationLevel.LTA_UPDATES`;
+* an out-of-scope **channel replacement** (e.g. re-pointing ``/Metadata`` at an
+  object that already existed) is rejected, because the identity semantics of
+  the signature do not cover it;
+* a **contradiction** (the two channels disagree about an identity field) and
+  **unparseable** metadata are rejected outright;
+* an anomaly that was already present in the signed revision is reported as
+  pre-existing, and is not attributed to the incremental update.
+
+Every incremental revision is analysed separately, so the exact revision in
+which an identity change (or a problem) occurred is retained. Rejected
+revisions report it via
+:attr:`~pyhanko.sign.diff_analysis.SuspiciousModification.revision` and
+:attr:`~pyhanko.sign.diff_analysis.SuspiciousModification.locations`, and
+accepted revisions record their identity findings on
+:attr:`~pyhanko.sign.diff_analysis.DiffResult.metadata_identity`. See
+:func:`~pyhanko.pdf_utils.metadata.identity.analyse_metadata_identity` and
+:class:`~pyhanko.sign.diff_analysis.MetadataIdentityRule` for details.
+
 .. testcode::
 
     from pyhanko.keys import load_cert_from_pemder

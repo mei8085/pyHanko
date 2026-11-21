@@ -28,7 +28,7 @@ from .rules.form_field_rules import (
     SigFieldCreationRule,
     SigFieldModificationRule,
 )
-from .rules.metadata_rules import DocInfoRule, MetadataUpdateRule
+from .rules.metadata_rules import MetadataIdentityRule
 from .rules_api import (
     ApprovalType,
     Context,
@@ -96,6 +96,16 @@ def _find_orphans(hist_rev: HistoricalResolver):
             obj, since_revision=hist_rev.revision
         )
     return candidate_orphans
+
+
+def _annotate_revision(exc: SuspiciousModification, new: HistoricalResolver):
+    """
+    Fill in revision-level location information on a
+    :class:`.SuspiciousModification` thrown by a rule, unless the rule already
+    provided it.
+    """
+    if exc.revision is None:
+        exc.revision = new.revision
 
 
 def _is_id(old_object: generic.PdfObject, new_object: generic.PdfObject):
@@ -275,9 +285,17 @@ class StandardDiffPolicy(DiffPolicy):
                 pass
             explained[_level].add(ref)
 
+        # Rules are allowed to raise SuspiciousModification directly; we make
+        # sure that the exception identifies the revision it was raised in, so
+        # that callers can locate the offending incremental update even when
+        # the rule itself didn't bother to fill in that information.
         for rule in self.global_rules:
-            for level, upd in rule.apply_qualified(old, new):
-                ingest_ref(level, upd)
+            try:
+                for level, upd in rule.apply_qualified(old, new):
+                    ingest_ref(level, upd)
+            except SuspiciousModification as exc:
+                _annotate_revision(exc, new)
+                raise
 
         changed_form_fields = set()
 
@@ -296,14 +314,18 @@ class StandardDiffPolicy(DiffPolicy):
                     if is_locked(field_name):
                         raise SuspiciousModification(
                             f"Update of {fu.updated_ref} is not allowed "
-                            f"because the form field {field_name} is locked."
+                            f"because the form field {field_name} is locked.",
+                            revision=new.revision,
+                            locations=(fu.updated_ref,),
                         )
                     changed_form_fields.add(field_name)
                 if doc_mdp is not None and not fu.valid_when_certifying:
                     raise SuspiciousModification(
                         f"Update of {fu.updated_ref} is only allowed "
                         f"after an approval signature, not a certification "
-                        f"signature."
+                        f"signature.",
+                        revision=new.revision,
+                        locations=(fu.updated_ref,),
                     )
 
         unexplained_lta = new_xrefs - explained[ModificationLevel.LTA_UPDATES]
@@ -364,7 +386,16 @@ class StandardDiffPolicy(DiffPolicy):
                 err_msg = f"{err_msg}\n{unchecked_paths_msg}"
                 logger.debug(unchecked_paths_msg)
 
-            raise SuspiciousModification(err_msg)
+            raise SuspiciousModification(
+                err_msg,
+                revision=new.revision,
+                locations=tuple(
+                    sorted(
+                        unexplained_annot,
+                        key=lambda ref: (ref.idnum, ref.generation),
+                    )
+                ),
+            )
         elif unexplained_formfill:
             level = ModificationLevel.ANNOTATIONS
         elif unexplained_lta:
@@ -373,8 +404,99 @@ class StandardDiffPolicy(DiffPolicy):
             level = ModificationLevel.LTA_UPDATES
 
         return DiffResult(
-            modification_level=level, changed_form_fields=changed_form_fields
+            modification_level=level,
+            changed_form_fields=changed_form_fields,
+            metadata_identity=self._metadata_identity_findings(old, new),
         )
+
+    def _has_metadata_rule(self) -> bool:
+        from .rules_api import _WrappingQualifiedWhitelistRule
+
+        for rule in self.global_rules:
+            if isinstance(rule, MetadataIdentityRule):
+                return True
+            if isinstance(rule, _WrappingQualifiedWhitelistRule) and isinstance(
+                rule.rule, MetadataIdentityRule
+            ):
+                return True
+        return False
+
+    def _metadata_identity_findings(
+        self, old: HistoricalResolver, new: HistoricalResolver
+    ) -> tuple:
+        """
+        Record the identity-level view of a revision pair, if the policy
+        includes a :class:`.MetadataIdentityRule`.
+
+        The identity analysis is memoised on the resolvers, so this is
+        inexpensive if the rule already ran. Recording it on the
+        :class:`.DiffResult` lets callers trace identity changes (and
+        pre-existing anomalies) for every accepted revision, not just for the
+        revisions that were rejected.
+        """
+        if not self._has_metadata_rule():
+            return ()
+        from pyhanko.pdf_utils.metadata.identity import (
+            analyse_metadata_identity,
+        )
+
+        return (analyse_metadata_identity(old, new),)
+
+    def _check_metadata_identity_step(
+        self, previous: HistoricalResolver, current: HistoricalResolver
+    ) -> object:
+        """
+        Compare the metadata identity of one incremental step, and refuse the
+        step if it introduces a contradiction between the metadata channels,
+        metadata that cannot be interpreted, or a channel replacement that
+        falls outside the signature's coverage.
+
+        This complements the per-rule check: :class:`.MetadataIdentityRule`
+        compares the signed revision to the revision under review, whereas
+        this step-level check pins any problem to the exact incremental
+        revision that introduced it. That also catches contradictions that a
+        later revision repairs again, which a comparison against the signed
+        revision would no longer see.
+        """
+        from pyhanko.pdf_utils.metadata.identity import (
+            MetadataIdentityVerdict,
+            analyse_metadata_identity,
+        )
+
+        report = analyse_metadata_identity(previous, current)
+        verdict = report.verdict
+        if verdict == MetadataIdentityVerdict.CONTRADICTION:
+            fields = ', '.join(
+                cmp.field for cmp in report.newly_problematic_fields
+            ) or ', '.join(cmp.field for cmp in report.problematic_fields)
+            raise SuspiciousModification(
+                f"The metadata channels in revision {current.revision} "
+                f"contradict each other on the following identity fields: "
+                f"{fields}. {report.summary()}",
+                revision=current.revision,
+                locations=report.locations,
+                metadata_identity=(report,),
+            )
+        elif verdict == MetadataIdentityVerdict.UNPARSEABLE:
+            raise SuspiciousModification(
+                f"The document metadata in revision {current.revision} could "
+                f"not be interpreted consistently. {report.summary()}",
+                revision=current.revision,
+                locations=report.locations,
+                metadata_identity=(report,),
+            )
+        elif verdict == MetadataIdentityVerdict.CHANNEL_REPLACEMENT:
+            raise SuspiciousModification(
+                f"Revision {current.revision} redirects the following "
+                f"metadata channels to pre-existing objects instead of "
+                f"updating them: {', '.join(report.replaced_channels)}. "
+                f"That replacement falls outside the metadata semantics "
+                f"covered by the signature. {report.summary()}",
+                revision=current.revision,
+                locations=report.locations,
+                metadata_identity=(report,),
+            )
+        return report
 
     def review_file(
         self,
@@ -390,6 +512,7 @@ class StandardDiffPolicy(DiffPolicy):
         """
 
         changed_form_fields = set()
+        metadata_identity = []
 
         rev_count = reader.xrefs.total_revisions
         current_max = ModificationLevel.NONE
@@ -416,10 +539,22 @@ class StandardDiffPolicy(DiffPolicy):
         # see a good way around this issue other than diffing every intermediate
         # version separately.
         for revision in range(base_revision_no + 1, rev_count):
+            new_resolver = reader.get_historical_resolver(revision)
             try:
+                if self._has_metadata_rule():
+                    # Adjudicate the identity-level change of this exact
+                    # incremental step, so that a contradiction introduced and
+                    # repaired in different revisions is still caught, and so
+                    # that the resulting report can be tied to this revision.
+                    metadata_identity.append(
+                        self._check_metadata_identity_step(
+                            reader.get_historical_resolver(revision - 1),
+                            new_resolver,
+                        )
+                    )
                 diff_result = self.apply(
                     old=base_rev_resolver,
-                    new=reader.get_historical_resolver(revision),
+                    new=new_resolver,
                     field_mdp_spec=field_mdp_spec,
                     doc_mdp=doc_mdp,
                 )
@@ -429,20 +564,39 @@ class StandardDiffPolicy(DiffPolicy):
                     f'{base_revision_no} and {revision}',
                     exc_info=e,
                 )
+                if e.revision is None:
+                    e.revision = revision
+                # Retain the identity findings for every revision leading up
+                # to (and including) the offending one, so the caller can see
+                # the full trajectory rather than just the final report.
+                # Reports are keyed by the revision pair they describe; the
+                # step-level check and the rule may both have produced one for
+                # the offending revision, in which case the rule's report (the
+                # last one) wins.
+                merged = {
+                    (rep.base_revision, rep.revision): rep
+                    for rep in (
+                        *metadata_identity,
+                        *e.metadata_identity,
+                    )
+                }
+                if merged:
+                    e.metadata_identity = tuple(merged.values())
                 return e
             current_max = max(current_max, diff_result.modification_level)
             changed_form_fields |= diff_result.changed_form_fields
-        return DiffResult(current_max, changed_form_fields)
+        return DiffResult(
+            current_max, changed_form_fields, tuple(metadata_identity)
+        )
 
 
 DEFAULT_DIFF_POLICY = StandardDiffPolicy(
     global_rules=[
         CatalogModificationRule(),
-        DocInfoRule().as_qualified(ModificationLevel.LTA_UPDATES),
+        MetadataIdentityRule(),
         XrefStreamRule().as_qualified(ModificationLevel.LTA_UPDATES),
         ObjectStreamRule().as_qualified(ModificationLevel.LTA_UPDATES),
         DSSCompareRule().as_qualified(ModificationLevel.LTA_UPDATES),
-        MetadataUpdateRule().as_qualified(ModificationLevel.LTA_UPDATES),
     ],
     form_rule=FormUpdatingRule(
         field_rules=[
@@ -460,16 +614,22 @@ The unqualified rules in the list all have their updates qualified at
 level :class:`~.ModificationLevel.LTA_UPDATES`.
 
 * :class:`.CatalogModificationRule`,
-* :class:`.DocInfoRule`,
+* :class:`.MetadataIdentityRule`,
 * :class:`.ObjectStreamRule`,
 * :class:`.XrefStreamRule`,
-* :class:`.DSSCompareRule`,
-* :class:`.MetadataUpdateRule`.
+* :class:`.DSSCompareRule`.
 * :class:`.FormUpdatingRule`, with the following field rules:
 
     * :class:`.SigFieldCreationRule`,
     * :class:`.SigFieldModificationRule`,
     * :class:`.GenericFieldModificationRule`.
+
+.. note::
+    Document metadata is adjudicated jointly across the information
+    dictionary and the XMP metadata stream. Updates that are coherent across
+    the channels that carry the title, author, subject or creation date are
+    cleared as LTA updates. Contradictory or unparseable metadata is rejected
+    outright. See :class:`.MetadataIdentityRule`.
 """
 
 

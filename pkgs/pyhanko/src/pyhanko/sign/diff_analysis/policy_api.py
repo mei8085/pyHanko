@@ -66,7 +66,49 @@ class ModificationLevel(OrderedEnum):
 
 
 class SuspiciousModification(ValueError):
-    """Error indicating a suspicious modification"""
+    """
+    Error indicating a suspicious modification.
+
+    In addition to the free-form error arguments, rules may attach the
+    revision in which the offending modification was observed
+    (:attr:`revision`), together with a summary of the object references or
+    paths that identify it (:attr:`locations`). This makes it possible to
+    pinpoint violations in documents that accumulated multiple incremental
+    updates after signing.
+    """
+
+    revision: int | None
+    """
+    The revision in which the suspicious modification was observed, if known.
+    """
+
+    locations: tuple
+    """
+    A (possibly empty) tuple of object references or paths identifying the
+    offending modification, if known.
+    """
+
+    metadata_identity: tuple
+    """
+    If the violation relates to document metadata, the
+    :class:`~pyhanko.pdf_utils.metadata.identity.MetadataIdentityReport`
+    objects for the revisions leading up to (and including) the offending one,
+    in revision order.
+
+    .. versionadded:: 0.39.0
+    """
+
+    def __init__(
+        self,
+        *args,
+        revision: int | None = None,
+        locations=(),
+        metadata_identity=(),
+    ):
+        super().__init__(*args)
+        self.revision = revision
+        self.locations = tuple(locations)
+        self.metadata_identity = tuple(metadata_identity)
 
 
 @dataclass(frozen=True)
@@ -90,6 +132,20 @@ class DiffResult:
         For the purposes of this parameter, a change is defined as any
         :class:`.FormUpdate` where :attr:`.FormUpdate.valid_when_locked`
         is ``False``.
+    """
+
+    metadata_identity: tuple = ()
+    """
+    Per-revision metadata identity findings, in revision order.
+
+    Each element is a
+    :class:`~pyhanko.pdf_utils.metadata.identity.MetadataIdentityReport`
+    describing how the document's descriptive metadata evolved in one
+    incremental revision. The reports are recorded even when the revision is
+    accepted, so callers can trace identity changes (and pre-existing
+    anomalies) back to the exact revision in which they occurred.
+
+    .. versionadded:: 0.39.0
     """
 
 

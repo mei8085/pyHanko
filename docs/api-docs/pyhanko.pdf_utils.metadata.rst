@@ -12,6 +12,14 @@ pyhanko.pdf\_utils.metadata.info module
    :undoc-members:
    :show-inheritance:
 
+pyhanko.pdf\_utils.metadata.identity module
+-------------------------------------------
+
+.. automodule:: pyhanko.pdf_utils.metadata.identity
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 pyhanko.pdf\_utils.metadata.model module
 ----------------------------------------
 
