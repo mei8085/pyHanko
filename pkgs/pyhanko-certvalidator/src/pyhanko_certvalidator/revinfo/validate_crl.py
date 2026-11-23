@@ -1,6 +1,7 @@
 import hashlib
 import logging
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -314,34 +315,341 @@ class _CRLErrs(Errors):
     issuer_failures: int = 0
 
 
+def _crl_number_of(crl_data: crl.CertificateList) -> int | None:
+    """
+    Extract the CRL number from a CRL, if present and parseable.
+    """
+
+    try:
+        crl_number = crl_data.crl_number_value
+    except (TypeError, ValueError):
+        return None
+    return None if crl_number is None else crl_number.native
+
+
+def _delta_base_number_of(crl_data: crl.CertificateList) -> int | None:
+    """
+    Extract the ``BaseCRLNumber`` from the delta CRL indicator, if present and
+    parseable.
+    """
+
+    try:
+        indicator = crl_data.delta_crl_indicator_value
+    except (TypeError, ValueError):
+        return None
+    return None if indicator is None else indicator.native
+
+
+def _issuing_distribution_points_match(
+    complete_idp: crl.IssuingDistributionPoint | None,
+    delta_idp: crl.IssuingDistributionPoint | None,
+) -> bool:
+    """
+    Check whether the issuing distribution points of a complete CRL and a
+    delta CRL establish the same scope (RFC 5280, §5.2.4, condition (b)).
+
+    Comparing the parsed values is more lenient than comparing the raw DER
+    encodings, but some encodings cannot be parsed into a value. In that case
+    we fall back to a byte-wise comparison, and treat any remaining parsing
+    issue as a non-match rather than letting it escape as an exception.
+    """
+
+    if complete_idp is None or delta_idp is None:
+        return complete_idp is None and delta_idp is None
+    try:
+        return complete_idp.native == delta_idp.native
+    except (TypeError, ValueError):
+        pass
+    try:
+        return complete_idp.dump() == delta_idp.dump()
+    except (TypeError, ValueError):
+        return False
+
+
+def _delta_crl_combines_with(
+    complete_crl_data: crl.CertificateList | None,
+    delta_crl_data: crl.CertificateList,
+    *,
+    crl_authority_name: x509.Name | None = None,
+    complete_idp: crl.IssuingDistributionPoint | None = None,
+    parent_crl_aki: bytes | None = None,
+) -> bool:
+    """
+    Check whether a delta CRL can be combined with a given complete CRL.
+
+    This implements the conditions in RFC 5280, §5.2.4 (a)--(d), together
+    with the scope checks from step (c) of the CRL processing algorithm in
+    §6.3.3. In particular, the CRL number of the complete CRL must fall in
+    the half-open interval ``[BaseCRLNumber, delta CRL number)``: the complete
+    CRL has to cover everything the referenced base CRL covered, and the delta
+    CRL has to come after the complete CRL in the numbering sequence.
+
+    A combination is only accepted if all of the conditions can be verified.
+    If either CRL lacks the numbering information needed to establish the
+    ordering, the pair is rejected. This keeps the outcome deterministic for
+    malformed or truncated inputs instead of silently combining CRLs whose
+    ordering cannot be established, which could otherwise cause a revocation
+    entry to be discarded incorrectly.
+
+    If ``complete_crl_data`` is ``None``, only the checks that do not depend
+    on the complete CRL's numbering can be performed; the CRL number
+    conditions are then skipped. This is only used for backwards
+    compatibility with callers that only have the delta CRL's metadata at
+    their disposal.
+
+    The ``complete_idp`` and ``parent_crl_aki`` parameters default to the
+    corresponding values extracted from ``complete_crl_data``; they exist so
+    that callers that already parsed those values do not have to do so twice.
+    Any parsing failure is treated as a non-match rather than being allowed to
+    escape as an exception.
+
+    :param complete_crl_data:
+        The complete CRL, if available.
+    :param delta_crl_data:
+        The candidate delta CRL.
+    :param crl_authority_name:
+        The authority name that the delta CRL must have as its issuer.
+    :param complete_idp:
+        The issuing distribution point of the complete CRL, if already
+        parsed.
+    :param parent_crl_aki:
+        The authority key identifier of the complete CRL, if already parsed.
+    :return:
+        ``True`` if the delta CRL can be combined with the complete CRL.
+    """
+
+    try:
+        return _delta_crl_combines_with_unchecked(
+            complete_crl_data,
+            delta_crl_data,
+            crl_authority_name=crl_authority_name,
+            complete_idp=complete_idp,
+            parent_crl_aki=parent_crl_aki,
+        )
+    except (TypeError, ValueError) as e:
+        # Malformed or truncated extension data: we cannot establish that the
+        # pairing is sound, so err on the side of rejecting it.
+        logger.debug(
+            "Failed to evaluate delta CRL combination conditions.", exc_info=e
+        )
+        return False
+
+
+def _delta_crl_combines_with_unchecked(
+    complete_crl_data: crl.CertificateList | None,
+    delta_crl_data: crl.CertificateList,
+    *,
+    crl_authority_name: x509.Name | None,
+    complete_idp: crl.IssuingDistributionPoint | None,
+    parent_crl_aki: bytes | None,
+) -> bool:
+    base_number = _delta_base_number_of(delta_crl_data)
+    if base_number is None:
+        # Without a delta CRL indicator, this is not a delta CRL at all.
+        return False
+
+    delta_number = _crl_number_of(delta_crl_data)
+    if complete_crl_data is not None:
+        complete_number = _crl_number_of(complete_crl_data)
+        if complete_number is None or delta_number is None:
+            # We cannot establish containment/ordering, so don't combine.
+            return False
+        # RFC 5280, §5.2.4, conditions (c) and (d).
+        if not (base_number <= complete_number < delta_number):
+            return False
+        if crl_authority_name is None:
+            crl_authority_name = complete_crl_data.issuer
+        if complete_idp is None:
+            complete_idp = complete_crl_data.issuing_distribution_point_value
+        if parent_crl_aki is None:
+            parent_crl_aki = complete_crl_data.authority_key_identifier
+
+    # Step c 1: both CRLs must have the same issuer. If we were given a
+    # complete CRL, use its issuer as the reference; otherwise the caller
+    # must supply one, and we default to the delta CRL's own issuer.
+    if crl_authority_name is None:
+        crl_authority_name = delta_crl_data.issuer
+    if delta_crl_data.issuer != crl_authority_name:
+        return False
+
+    # Step c 2 (and condition (b)): the scopes must agree.
+    delta_idp = delta_crl_data.issuing_distribution_point_value
+    if not _issuing_distribution_points_match(complete_idp, delta_idp):
+        return False
+
+    # Step c 3: the authority key identifiers must match.
+    try:
+        delta_aki = delta_crl_data.authority_key_identifier
+    except (TypeError, ValueError):
+        return False
+    return parent_crl_aki == delta_aki
+
+
+def _delta_crl_recency_key(crl_cont: CRLContainer):
+    """
+    Sort key for delta CRLs, from most to least recent.
+
+    Delta CRLs are ordered by CRL number first, then by issuance date. CRLs
+    without a parseable CRL number are ordered last. The raw DER encoding is
+    used as a final tiebreaker, so that the ordering is total and does not
+    depend on the order in which candidate CRLs happened to be supplied
+    (e.g. cache vs. freshly fetched data).
+
+    This key never raises: CRLs with unparseable metadata are ordered last
+    but remain selectable.
+    """
+
+    crl_data = crl_cont.crl_data
+    number = _crl_number_of(crl_data)
+    try:
+        issued = crl_cont.issuance_date
+    except (TypeError, ValueError):
+        issued = None
+    return (
+        number is not None,
+        number if number is not None else -1,
+        issued.isoformat() if issued is not None else '',
+        crl_data.dump(),
+    )
+
+
+def find_applicable_delta_crls(
+    complete_crl: CRLContainer,
+    delta_crls: Iterable[CRLContainer],
+    *,
+    crl_authority_name: x509.Name | None = None,
+    complete_idp: crl.IssuingDistributionPoint | None = None,
+    parent_crl_aki: bytes | None = None,
+) -> list[CRLContainer]:
+    """
+    Determine which delta CRLs can be combined with a given complete CRL.
+
+    The result is ordered from most to least recent: the first element is the
+    delta CRL that should be preferred when validating against
+    ``complete_crl``. Duplicate delta CRLs (e.g. one served from the cache and
+    one freshly downloaded) are only reported once.
+
+    This function is pure: it does not modify the input containers, nor any
+    validation state. Given the same inputs, it always returns the same
+    ordered result, regardless of the order in which ``delta_crls`` is
+    supplied.
+
+    .. versionadded:: 0.33.1
+
+    :param complete_crl:
+        The complete CRL that the delta CRLs would be combined with.
+    :param delta_crls:
+        Candidate delta CRLs.
+    :param crl_authority_name:
+        The authority name that the delta CRLs must have as their issuer.
+        Defaults to the issuer name of ``complete_crl``.
+    :param complete_idp:
+        The issuing distribution point of ``complete_crl``, if already
+        parsed.
+    :param parent_crl_aki:
+        The authority key identifier of ``complete_crl``, if already parsed.
+    :return:
+        An ordered list of applicable delta CRLs.
+    """
+
+    applicable: dict[bytes, CRLContainer] = {}
+    for delta_cont in delta_crls:
+        delta_data = delta_cont.crl_data
+        if not _delta_crl_combines_with(
+            complete_crl.crl_data,
+            delta_data,
+            crl_authority_name=crl_authority_name,
+            complete_idp=complete_idp,
+            parent_crl_aki=parent_crl_aki,
+        ):
+            continue
+        # Deduplicate on the DER encoding, keeping the first occurrence.
+        applicable.setdefault(delta_data.dump(), delta_cont)
+    return sorted(applicable.values(), key=_delta_crl_recency_key, reverse=True)
+
+
+def select_applicable_delta_crl(
+    complete_crl: CRLContainer,
+    delta_crls: Iterable[CRLContainer],
+    *,
+    crl_authority_name: x509.Name | None = None,
+    complete_idp: crl.IssuingDistributionPoint | None = None,
+    parent_crl_aki: bytes | None = None,
+) -> CRLContainer | None:
+    """
+    Select the delta CRL that should be combined with a given complete CRL.
+
+    This is a convenience wrapper around :func:`.find_applicable_delta_crls`
+    that returns the most recent applicable delta CRL, or ``None`` if there is
+    none.
+
+    .. versionadded:: 0.33.1
+
+    :param complete_crl:
+        The complete CRL that the delta CRL would be combined with.
+    :param delta_crls:
+        Candidate delta CRLs.
+    :param crl_authority_name:
+        The authority name that the delta CRL must have as its issuer.
+        Defaults to the issuer name of ``complete_crl``.
+    :param complete_idp:
+        The issuing distribution point of ``complete_crl``, if already
+        parsed.
+    :param parent_crl_aki:
+        The authority key identifier of ``complete_crl``, if already parsed.
+    :return:
+        The applicable delta CRL, or ``None``.
+    """
+
+    applicable = find_applicable_delta_crls(
+        complete_crl,
+        delta_crls,
+        crl_authority_name=crl_authority_name,
+        complete_idp=complete_idp,
+        parent_crl_aki=parent_crl_aki,
+    )
+    return applicable[0] if applicable else None
+
+
 def _find_matching_delta_crl(
     delta_lists: list[CRLContainer],
     crl_authority_name: x509.Name,
-    crl_idp: crl.IssuingDistributionPoint,
+    crl_idp: crl.IssuingDistributionPoint | None,
     parent_crl_aki: bytes | None,
+    complete_crl: CRLContainer | None = None,
 ) -> CRLContainer | None:
-    for candidate_delta_cl_cont in delta_lists:
-        candidate_delta_cl = candidate_delta_cl_cont.crl_data
-        # Step c 1
-        if candidate_delta_cl.issuer != crl_authority_name:
-            continue
+    """
+    Internal helper that resolves the delta CRL to use for a complete CRL.
 
-        # Step c 2
-        delta_crl_idp = candidate_delta_cl.issuing_distribution_point_value
-        if (crl_idp is None and delta_crl_idp is not None) or (
-            crl_idp is not None and delta_crl_idp is None
-        ):
-            continue
+    If ``complete_crl`` is supplied, the RFC 5280 CRL number conditions are
+    enforced as well, and the most recent applicable delta CRL is returned.
+    Without it, only the issuer, scope and key identifier checks can be
+    performed.
+    """
 
-        if crl_idp is not None and crl_idp.native != delta_crl_idp.native:
-            continue
+    if complete_crl is not None:
+        return select_applicable_delta_crl(
+            complete_crl,
+            delta_lists,
+            crl_authority_name=crl_authority_name,
+            complete_idp=crl_idp,
+            parent_crl_aki=parent_crl_aki,
+        )
 
-        # Step c 3
-        if parent_crl_aki != candidate_delta_cl.authority_key_identifier:
-            continue
-
-        return candidate_delta_cl_cont
-    return None
+    matching = [
+        delta_cont
+        for delta_cont in delta_lists
+        if _delta_crl_combines_with(
+            None,
+            delta_cont.crl_data,
+            crl_authority_name=crl_authority_name,
+            complete_idp=crl_idp,
+            parent_crl_aki=parent_crl_aki,
+        )
+    ]
+    if not matching:
+        return None
+    return max(matching, key=_delta_crl_recency_key)
 
 
 def _match_dps_idp_names(
@@ -611,12 +919,17 @@ async def _handle_single_crl(
             timing_params=validation_context.timing_params,
             delta_lists_by_issuer=delta_lists_by_issuer,
             errs=errs,
+            complete_crl_cont=certificate_list_cont,
         )
     else:
         delta_certificate_list_cont = None
 
     if delta_certificate_list_cont:
-        # Delta CRL validation Step h
+        # Delta CRL validation Step h.
+        # A delta CRL that fails verification cannot be combined with the
+        # complete CRL, so the complete CRL is unusable for our purposes:
+        # the CA advertised a delta, and we may be missing revocation entries
+        # that only appear on it.
         try:
             _verify_crl_signature(
                 delta_certificate_list_cont.crl_data,
@@ -674,52 +987,120 @@ def _maybe_get_delta_crl(
     errs: _CRLErrs,
     timing_params: ValidationTimingParams | None = None,
     policy: CertRevTrustPolicy | None = None,
+    complete_crl_cont: CRLContainer | None = None,
 ) -> CRLContainer | None:
-    if (
-        not certificate_list.freshest_crl_value
-        or len(certificate_list.freshest_crl_value) == 0
-    ):
+    """
+    Determine the delta CRL that should be combined with a given complete CRL.
+
+    Only delta CRLs that satisfy the RFC 5280 combination conditions are
+    considered; see :func:`.find_applicable_delta_crls`. If several applicable
+    delta CRLs are available, the most recent one (by CRL number, then by
+    issuance date) wins.
+
+    The search is limited to the delta CRLs announced by the complete CRL's
+    ``freshestCRL`` extension. If that extension announces delta CRLs but none
+    of the available candidates can be combined with the complete CRL, a
+    :class:`.CRLValidationIndeterminateError` is raised. Crucially, the
+    candidate search uses a scratch error buffer: failures recorded while
+    probing individual candidates are only merged into ``errs`` once a
+    candidate has been accepted, so that a failed lookup cannot leak state
+    into a later, independent operation.
+
+    :param certificate_list:
+        The complete CRL.
+    :param crl_issuer:
+        The issuer certificate of the complete CRL.
+    :param delta_lists_by_issuer:
+        Known delta CRLs, indexed by issuer name hash.
+    :param errs:
+        The error buffer for the current validation operation.
+    :param timing_params:
+        Timing parameters, used for the freshness check on the delta CRL.
+    :param policy:
+        The revocation information trust policy, used for the freshness check
+        on the delta CRL.
+    :param complete_crl_cont:
+        The complete CRL in its container form, if available. If it is not
+        supplied, the CRL number conditions from RFC 5280 cannot be enforced;
+        this is only supported for backwards compatibility.
+    :return:
+        The applicable delta CRL, or ``None`` if the complete CRL does not
+        reference any delta CRLs.
+    """
+
+    freshest_crl = certificate_list.freshest_crl_value
+    if not freshest_crl or len(freshest_crl) == 0:
         # nothing to do, return
         return None
 
     crl_authority_name = crl_issuer.subject
-    crl_idp: crl.IssuingDistributionPoint = (
+    crl_idp: crl.IssuingDistributionPoint | None = (
         certificate_list.issuing_distribution_point_value
     )
 
     candidate_delta_lists = delta_lists_by_issuer.get(
         crl_authority_name.hashable, []
     )
-    delta_certificate_list_cont = _find_matching_delta_crl(
-        delta_lists=candidate_delta_lists,
-        crl_authority_name=crl_authority_name,
-        crl_idp=crl_idp,
-        parent_crl_aki=certificate_list.authority_key_identifier,
-    )
-    if not delta_certificate_list_cont:
+    # Evaluate the combination conditions against a scratch buffer. Nothing
+    # we record while probing candidates should affect the surrounding
+    # validation unless we actually settle on a delta CRL.
+    probe_errs = _CRLErrs()
+    if complete_crl_cont is not None:
+        applicable = find_applicable_delta_crls(
+            complete_crl_cont,
+            candidate_delta_lists,
+            crl_authority_name=crl_authority_name,
+            complete_idp=crl_idp,
+            parent_crl_aki=certificate_list.authority_key_identifier,
+        )
+    else:
+        matching_cont = _find_matching_delta_crl(
+            delta_lists=candidate_delta_lists,
+            crl_authority_name=crl_authority_name,
+            crl_idp=crl_idp,
+            parent_crl_aki=certificate_list.authority_key_identifier,
+        )
+        applicable = [matching_cont] if matching_cont is not None else []
+
+    if not applicable:
         raise CRLValidationIndeterminateError(
             "Delta CRL matching Freshest CRL extension not available",
             failures=[],
             suspect_stale=None,
         )
 
-    if not _verify_no_unknown_critical_extensions(
-        delta_certificate_list_cont, errs, is_delta=True
-    ):
-        return None
+    # Try the candidates from most to least recent, and use the first one
+    # that passes the remaining checks.
+    for delta_certificate_list_cont in applicable:
+        candidate_errs = _CRLErrs()
+        if not _verify_no_unknown_critical_extensions(
+            delta_certificate_list_cont, candidate_errs, is_delta=True
+        ):
+            probe_errs.merge(candidate_errs)
+            continue
 
-    if (
-        policy
-        and timing_params
-        and _check_crl_freshness(
-            delta_certificate_list_cont,
-            policy,
-            timing_params,
-            errs,
-            is_delta=True,
-        )
-    ):
+        if (
+            policy
+            and timing_params
+            and not _check_crl_freshness(
+                delta_certificate_list_cont,
+                policy,
+                timing_params,
+                candidate_errs,
+                is_delta=True,
+            )
+        ):
+            probe_errs.merge(candidate_errs)
+            continue
+
+        # Found a delta CRL we can work with. Failures recorded for this
+        # candidate would have caused a `continue` above, so the scratch
+        # buffer only contains notes about rejected earlier candidates. Those
+        # are not failures of the operation as a whole, so we discard them.
         return delta_certificate_list_cont
+
+    # No usable candidate: report why the candidates were rejected.
+    errs.merge(probe_errs)
     return None
 
 
@@ -1221,6 +1602,7 @@ async def _assess_crl_relevance(
                     crl_issuer=putative_issuer,
                     delta_lists_by_issuer=delta_lists_by_issuer,
                     errs=errs,
+                    complete_crl_cont=certificate_list_cont,
                 )
             except CRLValidationIndeterminateError as e:
                 errs.append(e.msg, certificate_list)

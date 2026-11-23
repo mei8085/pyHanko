@@ -6,6 +6,36 @@ Release history
 pyHanko
 -------
 
+.. _release-0.38.3:
+
+0.38.3
+======
+
+*Release date:* TBD
+
+
+New features and enhancements
+-----------------------------
+
+ * ``pyhanko_certvalidator.revinfo.validate_crl`` now exposes
+   :func:`.find_applicable_delta_crls` and
+   :func:`.select_applicable_delta_crl` to inspect the delta CRL selection
+   process directly.
+
+
+Bugs fixed
+----------
+
+ * Only combine a delta CRL with a complete CRL if the CRL numbering
+   satisfies the conditions in RFC 5280, §5.2.4, and prefer the most recent
+   applicable delta CRL when several are available. Previously, an
+   inapplicable delta CRL could be combined with a complete CRL, and the
+   selection between multiple candidates depended on the order in which they
+   were supplied.
+ * Delta CRL lookups no longer leak failure state into unrelated subsequent
+   operations when no applicable delta CRL can be found.
+
+
 .. _release-0.38.2:
 
 0.38.2
